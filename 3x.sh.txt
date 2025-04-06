@@ -1,0 +1,217 @@
+#!/bin/bash
+
+# رنگ‌ها برای خروجی زیبا
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+clear
+echo -e "${GREEN}Torrent-to-OneDrive نصب پیشرفته در حال شروع است...${NC}"
+
+# بررسی نصب whiptail
+if ! command -v whiptail >/dev/null 2>&1; then
+  sudo apt update && sudo apt install -y whiptail
+fi
+
+# تابع منوی اصلی
+show_menu() {
+  CHOICE=$(whiptail --title "Torrent-to-OneDrive Installer" \
+    --menu "لطفاً یک گزینه انتخاب کنید:" 15 60 5 \
+    "1" "نصب/به‌روزرسانی بک‌اند" \
+    "2" "نصب/به‌روزرسانی فرانت‌اند" \
+    "3" "تنظیم rclone (احراز هویت OneDrive)" \
+    "4" "نمایش وضعیت سرویس‌ها" \
+    "5" "خروج" 3>&1 1>&2 2>&3)
+  echo $CHOICE
+}
+
+# تابع نصب/به‌روزرسانی بک‌اند
+install_backend() {
+  echo -e "${GREEN}در حال نصب/به‌روزرسانی بک‌اند...${NC}"
+  mkdir -p /opt/torrent2onedrive && cd /opt/torrent2onedrive
+  if [ -d "backend" ]; then
+    cd backend
+    git pull origin main
+  else
+    git clone https://github.com/atbin44/torrent2onedrive.git backend
+    cd backend
+    python3 -m venv venv
+  fi
+  source venv/bin/activate
+  pip install -r requirements.txt
+  # ثبت سرویس systemd (همانطور که قبلاً تنظیم شده)
+  sudo tee /etc/systemd/system/torrent-backend.service > /dev/null <<EOF
+[Unit]
+Description=Torrent2OneDrive Backend
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/torrent2onedrive/backend
+ExecStart=/opt/torrent2onedrive/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reexec
+  sudo systemctl daemon-reload
+  sudo systemctl enable torrent-backend
+  sudo systemctl restart torrent-backend
+  echo -e "${GREEN}بک‌اند نصب شد.${NC}"
+}
+
+# تابع نصب/به‌روزرسانی فرانت‌اند
+install_frontend() {
+  echo -e "${GREEN}در حال نصب/به‌روزرسانی فرانت‌اند...${NC}"
+  cd /opt/torrent2onedrive
+  if [ -d "frontend" ]; then
+    cd frontend
+    npm install
+    npm run build
+  else
+    npm create vite@latest frontend -- --template react
+    cd frontend
+    npm install
+    npm install axios
+    npm install -D tailwindcss postcss autoprefixer
+    npx tailwindcss init -p
+    sed -i 's/content: \[\]/content: [".\/index.html", ".\/src\/.*\\.(js|ts|jsx|tsx)"]/' tailwind.config.js
+    mkdir -p src
+    cat <<EOF > src/index.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+EOF
+    # کدهای نمونه فرانت را نیز اضافه می‌کنیم (مانند App.jsx و main.jsx)
+    cat <<EOF > src/App.jsx
+import { useState } from "react";
+import axios from "axios";
+
+function App() {
+  const [localPath, setLocalPath] = useState("");
+  const [remotePath, setRemotePath] = useState("");
+  const [response, setResponse] = useState("");
+
+  const handleUpload = async () => {
+    try {
+      const res = await axios.post("http://localhost:8000/upload-to-onedrive", {
+        local_path: localPath,
+        remote_path: remotePath,
+      });
+      setResponse(JSON.stringify(res.data, null, 2));
+    } catch (err) {
+      setResponse(err.message);
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-6 bg-gray-100">
+      <div className="max-w-xl mx-auto bg-white rounded-2xl shadow p-4">
+        <h1 className="text-2xl font-bold mb-4">🚀 آپلود به OneDrive</h1>
+        <input
+          type="text"
+          placeholder="مسیر فایل محلی"
+          className="w-full mb-2 p-2 border rounded"
+          value={localPath}
+          onChange={(e) => setLocalPath(e.target.value)}
+        />
+        <input
+          type="text"
+          placeholder="مسیر در OneDrive (اختیاری)"
+          className="w-full mb-2 p-2 border rounded"
+          value={remotePath}
+          onChange={(e) => setRemotePath(e.target.value)}
+        />
+        <button
+          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+          onClick={handleUpload}
+        >
+          آپلود
+        </button>
+        {response && (
+          <pre className="bg-gray-200 p-2 mt-4 rounded text-sm overflow-auto">
+            {response}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;
+EOF
+    cat <<EOF > src/main.jsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+EOF
+    cat <<EOF > index.html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Torrent2OneDrive</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+EOF
+  fi
+  echo -e "${GREEN}فرانت‌اند نصب شد.${NC}"
+}
+
+# تابع تنظیم rclone
+setup_rclone() {
+  echo -e "${GREEN}تنظیم rclone در حال اجرا است...${NC}"
+  # اینجا می‌توانید دستور rclone config را اجرا کنید
+  rclone config
+}
+
+# تابع نمایش وضعیت سرویس‌ها
+show_status() {
+  echo -e "${GREEN}نمایش وضعیت سرویس torrent-backend...${NC}"
+  sudo systemctl status torrent-backend
+  read -p "برای ادامه Enter بزن..."
+}
+
+# منوی اصلی نصب
+while true; do
+  CHOICE=$(whiptail --title "Torrent-to-OneDrive Installer" \
+    --menu "لطفاً یک گزینه انتخاب کنید:" 15 60 5 \
+    "1" "نصب/به‌روزرسانی بک‌اند" \
+    "2" "نصب/به‌روزرسانی فرانت‌اند" \
+    "3" "تنظیم rclone (احراز هویت OneDrive)" \
+    "4" "نمایش وضعیت سرویس‌ها" \
+    "5" "خروج" 3>&1 1>&2 2>&3)
+  case $CHOICE in
+    "1")
+      install_backend
+      ;;
+    "2")
+      install_frontend
+      ;;
+    "3")
+      setup_rclone
+      ;;
+    "4")
+      show_status
+      ;;
+    "5")
+      echo -e "${GREEN}خروج از نصب...${NC}"
+      exit 0
+      ;;
+    *)
+      echo "گزینه نامعتبر"
+      ;;
+  esac
+done
